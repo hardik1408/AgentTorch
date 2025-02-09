@@ -102,4 +102,75 @@ class Geometric(torch.autograd.Function):
 
         ws = (w_plus_cont + w_minus_cont) / 2.0  # average weights for unbiased gradientn
         return grad_output * ws
+    
+
+class StochasticCategorical(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, probs):
+        """
+        Forward pass: Sample a category (index) from a categorical distribution.
+        
+        Args:
+            probs (Tensor): 1D tensor of probabilities (summing to 1) with requires_grad=True.
+        
+        Returns:
+            Tensor: A scalar float tensor equal to the sampled index.
+        """
+        # Compute the cumulative distribution
+        cum_probs = torch.cumsum(probs, dim=0)
+        # Sample a uniform number in [0,1)
+        u = torch.rand(1, device=probs.device)
+        # Find the first index where u <= cumulative probability
+        idx = torch.searchsorted(cum_probs, u)
+        idx_int = int(idx.item())
+        # Save for backward: the probabilities and the sampled index.
+        ctx.save_for_backward(probs, torch.tensor(idx_int, device=probs.device))
+        # The “primal” outcome is just the sampled index; convert to float so gradients flow.
+        return torch.tensor(idx_int, dtype=torch.float32, device=probs.device)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        Backward pass: Return an unbiased derivative estimate via the discrete jump.
+        
+        For the sampled category i, we set:
+          - If i > 0: a “downward jump” is applied, using the cumulative probability below index i,
+                F_lower = sum(probs[0:i]).
+              Then we define w = F_lower / probs[i] and Y = i – 1.
+              Thus the derivative estimate is w · (Y – i) = -w.
+          - If i == 0, no jump is available so the derivative is 0.
+        
+        Args:
+            grad_output (Tensor): Upstream gradient.
+        
+        Returns:
+            Tensor: Gradient with respect to `probs` (a vector with zeros everywhere except possibly at one entry).
+        """
+        probs, idx_tensor = ctx.saved_tensors
+        i = int(idx_tensor.item())
+        grad_probs = torch.zeros_like(probs)
+        n = probs.shape[0]
+        # For i==0, no upward (or downward) jump is available.
+        if i == 0:
+            return grad_probs
+        # Compute the cumulative probability below the sampled index:
+        F_lower = torch.sum(probs[:i])
+        # Set jump weight: w = F_lower / probs[i]
+        w = F_lower / probs[i]
+        # Alternative outcome: Y = i - 1; therefore, the discrete derivative equals
+        # w * (Y - i) = w * ((i - 1) - i) = -w.
+        # Propagate the (scalar) gradient only to the i-th element.
+        grad_probs[i] = grad_output * (-w)
+        return grad_probs
+
+
+
+
+
+
+
+
+
+
+
 
